@@ -3,8 +3,11 @@
 
 import re,os,shutil,time, aiohttp
 from telethon.tl import types
-import logging, os, shutil
+import logging, shutil
+import math, json
+import urllib.parse
 import asyncio as aio
+from bs4 import BeautifulSoup
 from . import QBittorrentWrap
 from . import ariatools
 from .tele_upload import upload_handel
@@ -59,8 +62,6 @@ def get_entities(msg):
 async def check_link(msg,rclone=False,is_zip=False, extract=False):
     # here moslty rmess = Reply message which the bot uses to update
     # omess = original message from the sender user 
-    urls = None
-    print("here2")
     omess = msg
     msg = await msg.get_reply_message()
 
@@ -275,10 +276,91 @@ async def check_link(msg,rclone=False,is_zip=False, extract=False):
         else:
             # url = get_entities(msg)
             # currently discontinuing the depending on the entities as its eratic
+            urls = msg.raw_text
             url = None
-            torlog.info("Downloading Urls")
-            rmsg = await omess.reply("Processing the link.")
+            torlog.info("The aria2 Downloading:\n{}".format(urls))
+            rmsg = await omess.reply("**Processing the link...**")
+            await aio.sleep(1)
+            # Starting directlink generator... 
+            
+            # A mention https://github.com/yash-dk/TorToolkit-Telegram/pull/42 [professor-21]
+            # For initial contibution of ZippyShare and Mediafire. 
+            
+            #Mediafire
+            if 'mediafire.com' in urls:
+                await rmsg.edit("`Generating mediafire link.`")
+                await aio.sleep(2)
+                try:
+                    link = re.findall(r'\bhttps?://.*mediafire\.com\S+', urls)[0]
+                    async with aiohttp.ClientSession() as ttksess:
+                        resp = await ttksess.get(link)
+                        restext = await resp.text()
+                    
+                    page = BeautifulSoup(restext, 'lxml')
+                    info = page.find('a', {'aria-label': 'Download file'})
+                    url = info.get('href')
+                except:
+                    await omess.reply("**No mediafire link found.**")
+                
+                
+            #Zippyshare
+            elif  'zippyshare.com' in urls:
+                await rmsg.edit("`Generating zippyshare link.`")
+                await aio.sleep(2)
+                #Zippyshare fix directlink generator for ttk by @yourtulloh based on:
+                #Zippyshare up-to-date plugin from https://github.com/UsergeTeam/Userge-Plugins/blob/master/plugins/zippyshare.py
+                #Thanks to all contributors @aryanvikash, rking32, @BianSepang
+                tulloh = r'https://www(\d{1,3}).zippyshare.com/v/(\w{8})/file.html'
+                regex_result = (
+                    r'var a = (\d{6});\s+var b = (\d{6});\s+document\.getElementById'
+                    r'\(\'dlbutton\'\).omg = "f";\s+if \(document.getElementById\(\''
+                    r'dlbutton\'\).omg != \'f\'\) {\s+a = Math.ceil\(a/3\);\s+} else'
+                    r' {\s+a = Math.floor\(a/3\);\s+}\s+document.getElementById\(\'d'
+                    r'lbutton\'\).href = "/d/[a-zA-Z\d]{8}/\"\+\(a \+ \d{6}%b\)\+"/('
+                    r'[\w%-.]+)";'
+                )
+                
+                match = re.match(tulloh, urls)
+                if not match:
+                    await omess.reply("**Invalid URL:**\n" + str(urls))
+                
+                server, id_ = match.group(1), match.group(2)
+                async with aiohttp.ClientSession() as ttksess:
+                    resp = await ttksess.get(urls)
+                    restext = await resp.text()
+                    
+                match = re.search(regex_result, restext, re.DOTALL)
+                if not match:
+                    await omess.reply("**Invalid response, try again!**")
+                
+                val_1 = int(match.group(1))
+                val_2 = math.floor(val_1 / 3)
+                val_3 = int(match.group(2))
+                val = val_1 + val_2 % val_3
+                name = match.group(3)
+                url = "https://www{}.zippyshare.com/d/{}/{}/{}".format(server, id_, val, name)
+                
+           #yadisk
+            elif 'yadi.sk' in urls or 'disk.yandex.com' in urls:
+                await rmsg.edit("`Generating yadisk link.`")
+                await aio.sleep(2)
+                try:
+                    link = re.findall(r'\b(https?://.*(yadi|disk)\.(sk|yandex)*(|com)\S+)', urls)[0][0]
+                    print(link)
+                except:
+                    await omess.reply("**No yadisk link found.**")
+                api = 'https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key={}'
+                try:
+                    async with aiohttp.ClientSession() as ttksess:
+                        resp = await ttksess.get(api.format(link))
+                        restext = await resp.json()
+                        url = restext['href']
+                    
+                except:
+                    torlog.exception("Ayee jooo")
+                    await omess.reply("**404 File Not Found** or \n**Download limit reached.**")
 
+            # End directlink generator.
             re_name = None
             try:
                 if " "  in omess.raw_text:
@@ -560,7 +642,7 @@ async def cancel_torrent(hashid, is_aria = False):
 
 def get_size_fl(start_path = '.'):
     total_size = 0
-    for dirpath, dirnames, filenames in os.walk(start_path):
+    for dirpath, _, filenames in os.walk(start_path):
         for f in filenames:
             fp = os.path.join(dirpath, f)
             # skip if it is symbolic link
